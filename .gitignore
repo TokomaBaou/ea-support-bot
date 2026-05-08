@@ -1,0 +1,39 @@
+# ─── Secrets ───
+.env
+.env.local
+.env.*.local
+*.key
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Node / Next.js ───
+node_modules/
+.next/
+out/
+dist/
+build/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── OS / Editor ───
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ─── Fine-tuning artifacts ───
+data/finetune_*.jsonl
+.openai_cache/
