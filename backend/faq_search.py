@@ -351,12 +351,76 @@ def _extract_core_keywords(query: str) -> str:
     return result.strip()
 
 
+# ---------------------------------------------------------------------------
+# Step 0: 優先ルーティングテーブル
+# キーワードの組み合わせで特定のソースに強制ルーティングする。
+# bigram フォールバックでは区別しにくい「動画→faq vs salon」等の
+# 曖昧なケースを解消するためのルール。
+# ---------------------------------------------------------------------------
+_PRIORITY_ROUTES: list[dict[str, object]] = [
+    # 「動画」単体（音関連を除く）→ faq（動画再生トラブル系）
+    {
+        "require_all": ["動画"],
+        "exclude": ["音", "音声", "音量"],
+        "source": "faq",
+    },
+    # 「音」+「出」→ salon（音が出ない系）
+    {
+        "require_all": ["音", "出"],
+        "source": "salon",
+    },
+    # 「Zoom」→ salon（Zoom 接続トラブル系）
+    {
+        "require_any": ["Zoom", "zoom", "ZOOM"],
+        "source": "salon",
+    },
+]
+
+
+def _check_priority_routes(query: str) -> SourceName | None:
+    """優先ルーティングテーブルを照合し、マッチするソースを返す。
+
+    マッチしない場合は None を返す。
+    ルールは定義順に評価され、最初にマッチしたものが採用される。
+    """
+    q_lower = query.lower()
+    for rule in _PRIORITY_ROUTES:
+        require_all: list[str] = rule.get("require_all", [])  # type: ignore[assignment]
+        require_any: list[str] = rule.get("require_any", [])  # type: ignore[assignment]
+        exclude: list[str] = rule.get("exclude", [])  # type: ignore[assignment]
+        source: SourceName = rule["source"]  # type: ignore[assignment]
+
+        # require_all: すべてのキーワードが含まれること
+        if require_all and not all(kw in query for kw in require_all):
+            continue
+
+        # require_any: いずれかのキーワードが含まれること
+        if require_any and not any(kw.lower() in q_lower for kw in require_any):
+            continue
+
+        # require_all も require_any も空 → ルール不正、スキップ
+        if not require_all and not require_any:
+            continue
+
+        # exclude: いずれかのキーワードが含まれていたら不一致
+        if exclude and any(kw in query for kw in exclude):
+            continue
+
+        return source
+
+    return None
+
+
 def search_auto(
     query: str,
     top_k: int = 3,
     min_score: float = 0.05,
 ) -> AutoSearchResult:
     """全ソースを横断検索し、最もスコアの高いソースの結果を返す。
+
+    Step 0 (優先ルーティング):
+      キーワードの組み合わせルールで即決できるケースを先に処理する。
+      「動画」→faq、「音+出」→salon、「Zoom」→salon など。
 
     Step 1 (キーワードルーティング):
       クエリから共通パターンを除去してコアキーワードを抽出し、
@@ -373,6 +437,12 @@ def search_auto(
         return AutoSearchResult(hits=[], matched_source="faq")
 
     normalized = normalize_query(query)
+
+    # --- Step 0: 優先ルーティング ---
+    priority_source = _check_priority_routes(normalized)
+    if priority_source is not None:
+        hits = search(query, top_k=top_k, min_score=min_score, source=priority_source)
+        return AutoSearchResult(hits=hits, matched_source=priority_source)
 
     # --- Step 1: コアキーワードの部分一致ルーティング ---
     core = _extract_core_keywords(normalized)
