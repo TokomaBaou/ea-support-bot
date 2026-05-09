@@ -176,21 +176,34 @@ def _build_agent_system_prompt() -> str:
 ## あなたの役割
 受講生からのメッセージを受け取り、適切なツールを使って情報を集め、最適な回答を生成してください。
 
-## 意図分類
-メッセージを受け取ったら、まず以下のカテゴリに分類し、適切なツールを呼び出してください：
-- faq_question: 講座・サロン・技術的な質問（例: 「再受講はできますか？」「動画が見れない」）
-- consultation: 悩みや不安の相談（例: 「チャクラが詰まってる気がして…」「浄化中に体調が悪い」）
-- experience_report: 体験や気づきの報告（例: 「エゴを出し切る概念に衝撃！」「瞑想で光が見えた」）
-- method_question: やり方・手順の質問（例: 「ミラクルチェンジのやり方を教えて」「グラウンディングの方法」）
-- greeting: あいさつ（例: 「こんにちは」「はじめまして」）
+## 意図分類（最重要 — 必ず最初に判断すること）
+get_response_pattern を呼び出す際に、以下の基準で正しいパターンを選択してください。
+この選択が回答全体の方針を決定します。
+
+### パターン選択の判断基準（上から順に判定）
+1. **empathy** ← メッセージに感情・体調変化・不安・悩みが含まれている場合
+   - 「つらい」「不安」「うまくできない」「体調が悪い」「崩れている感じ」「〜な気がする」等
+   - 末尾が「〜でしょうか？」「〜した方がいいですか？」でも、背景に悩みがあれば empathy
+   - 身体の不調、エネルギーの変化、ワークの体感に関する相談 → 必ず empathy
+2. **encouragement** ← 体験や気づきの報告
+   - 「衝撃を受けた」「気づいた」「できるようになった」「変わった」「すごい」等
+3. **detailed_feedback** ← やり方・手順の質問
+   - 「やり方を教えて」「方法は？」「どうすれば？」等
+4. **brief** ← 事実確認のみ or あいさつ
+   - 感情や体験を含まない純粋な質問（料金、手続き、ルール、用語の意味「〜とは何ですか？」）
+   - 「こんにちは」「はじめまして」等のあいさつ
+
+### 迷った場合のルール
+- 感情が少しでも含まれていれば brief/detailed_feedback ではなく empathy を選ぶ
+- 質問形で終わっていても、長い体験や状況説明があれば empathy を選ぶ
 
 ## ツール使用ガイド
-意図に応じて以下のツールを呼び出してください：
-- faq_question → search_faq(query) + get_response_pattern("brief")
-- consultation → search_faq(query, source="auto") + get_response_pattern("empathy") + 必要に応じて search_golden_answers(query)
-- experience_report → get_response_pattern("encouragement") + 必要に応じて lookup_terms
-- method_question → search_faq(query, source="auto") + get_response_pattern("detailed_feedback")
-- greeting → get_response_pattern("brief") のみ（ツール不要、直接応答可）
+get_response_pattern でパターンを選択した後、必要に応じて以下のツールを追加で呼び出してください：
+- brief (faq_question) → search_faq(query)
+- empathy (consultation) → search_faq(query, source="auto") + 必要に応じて search_golden_answers(query)
+- encouragement (experience_report) → 必要に応じて lookup_terms
+- detailed_feedback (method_question) → search_faq(query, source="auto")
+- brief (greeting) → 追加ツール不要
 
 ## スピリチュアル用語（背景知識）
 以下の用語は回答時の背景知識として活用してください。定義をそのまま返すのではなく、
@@ -349,11 +362,25 @@ _PATTERN_TO_INTENT: dict[str, str] = {
     "brief": "faq_question",
 }
 
+_GREETING_KEYWORDS: list[str] = [
+    "こんにちは",
+    "はじめまして",
+    "おはよう",
+    "こんばんは",
+    "よろしく",
+    "お疲れ",
+    "ありがとう",
+]
 
-def _infer_intent(response_pattern: str, tools_used: list[str]) -> str:
-    """使用された回答パターンとツールから意図を推定する。"""
-    if response_pattern == "brief" and "search_faq" not in tools_used:
-        return "greeting"
+
+def _infer_intent(
+    response_pattern: str, tools_used: list[str], query: str
+) -> str:
+    """使用された回答パターン・ツール・元クエリから意図を推定する。"""
+    if response_pattern == "brief":
+        if any(kw in query for kw in _GREETING_KEYWORDS) and len(query) < 30:
+            return "greeting"
+        return "faq_question"
     return _PATTERN_TO_INTENT.get(response_pattern, "faq_question")
 
 
@@ -395,8 +422,36 @@ def run_agent(
     response_pattern: str = "brief"
     max_tokens = 1024 if detail_level == "detailed" else 400
 
-    # ツール呼び出しループ（最大 MAX_TOOL_ROUNDS 回）
-    assistant_msg: object = None
+    # --- Step 1: 意図分類（get_response_pattern を強制呼び出し） ---
+    response = client.chat.completions.create(
+        model=_model_id(),
+        messages=messages,  # type: ignore[arg-type]
+        tools=AGENT_TOOLS,  # type: ignore[arg-type]
+        tool_choice={
+            "type": "function",
+            "function": {"name": "get_response_pattern"},
+        },
+        temperature=0.3,
+        max_tokens=max_tokens,
+    )
+    assistant_msg = response.choices[0].message
+    messages.append(_serialize_assistant_msg(assistant_msg))
+    for tool_call in assistant_msg.tool_calls or []:
+        name = tool_call.function.name
+        args = json.loads(tool_call.function.arguments)
+        tools_used.append(name)
+        result = _execute_tool(name, args)
+        if name == "get_response_pattern":
+            response_pattern = str(args.get("pattern_id", "brief"))
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps(result, ensure_ascii=False),
+            }
+        )
+
+    # --- Step 2: 追加ツール呼び出し（auto） ---
     for _ in range(MAX_TOOL_ROUNDS):
         response = client.chat.completions.create(
             model=_model_id(),
@@ -409,13 +464,10 @@ def run_agent(
         assistant_msg = response.choices[0].message
 
         if not assistant_msg.tool_calls:
-            # ツール呼び出しなし → 最終回答
             break
 
-        # アシスタントメッセージを会話履歴に追加
         messages.append(_serialize_assistant_msg(assistant_msg))
 
-        # 各ツール呼び出しを実行
         for tool_call in assistant_msg.tool_calls:
             name = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
@@ -423,7 +475,6 @@ def run_agent(
 
             result = _execute_tool(name, args)
 
-            # メタデータを追跡
             if name == "search_faq":
                 hits = result.get("hits", [])
                 if hits:
@@ -431,8 +482,6 @@ def run_agent(
                 src = result.get("matched_source")
                 if src:
                     matched_source = str(src)
-            if name == "get_response_pattern":
-                response_pattern = str(args.get("pattern_id", "brief"))
 
             messages.append(
                 {
@@ -442,7 +491,6 @@ def run_agent(
                 }
             )
     else:
-        # ツールラウンドを使い切った → ツールなしで最終回答を生成
         response = client.chat.completions.create(
             model=_model_id(),
             messages=messages,  # type: ignore[arg-type]
@@ -452,7 +500,7 @@ def run_agent(
         assistant_msg = response.choices[0].message
 
     answer = (getattr(assistant_msg, "content", None) or "").strip()
-    intent = _infer_intent(response_pattern, tools_used)
+    intent = _infer_intent(response_pattern, tools_used, message)
 
     # ソース情報をフォーマット
     source_list: list[dict[str, str]] = [
