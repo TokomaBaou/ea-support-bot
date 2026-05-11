@@ -225,6 +225,60 @@ def _run_fallback(
     return answer, sources, matched
 
 
+def _notify_negative_slack(query: str, intent: str, bot_answer: str) -> None:
+    """ネガティブ意図検知時にSlackへ通知する。"""
+    notify_slack(
+        {
+            "text": "🚨 ネガティブ検知",
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "🚨 ネガティブ検知",
+                    },
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*受講生のメッセージ*\n>{query}",
+                    },
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"*分類*\n{intent}",
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": "*推奨対応*\n担当者による個別フォロー",
+                        },
+                    ],
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Bot回答*\n>{bot_answer}",
+                    },
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": "⚠️ 早急に担当者からフォローをお願いします。",
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+
+
 def _notify_pilot_slack(query: str, answer: str, session_id: str) -> None:
     """パイロットモード: Bot の回答案を担当者にSlackで確認してもらう。"""
     notify_slack(
@@ -340,6 +394,9 @@ def chat(req: ChatRequest) -> ChatResponse:
         answer_text, hit_sources, matched_source = _run_fallback(
             req.message, req.source
         )
+
+    if intent == "negative":
+        _notify_negative_slack(req.message, intent, answer_text)
 
     pilot_mode = _is_pilot_mode()
     if pilot_mode:
