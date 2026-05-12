@@ -466,18 +466,26 @@ def search_auto(
 
     # --- Step 2: bigram フォールバックルーティング ---
     global_weights = _global_idf_weights()
-    best_source: SourceName = "faq"
-    best_top_score: float = -1.0
+    source_best: dict[SourceName, float] = {}
 
     for src in ALL_SOURCES:
         faqs = load_faqs(src)
+        top_score = 0.0
         for entry in faqs:
             query_bigrams = _bigrams(normalized)
             question_bigrams = _bigrams(entry["question"])
             score = _idf_overlap(query_bigrams, question_bigrams, global_weights)
-            if score > best_top_score:
-                best_top_score = score
-                best_source = src
+            if score > top_score:
+                top_score = score
+        source_best[src] = top_score
+
+    # salonソースを優先: salonが他ソースの80%以上のスコアならsalonを選択
+    best_score = max(source_best.values()) if source_best else 0.0
+    salon_score = source_best.get("salon", 0.0)
+    if salon_score > 0 and salon_score >= best_score * 0.8:
+        best_source: SourceName = "salon"
+    else:
+        best_source = max(source_best, key=lambda s: source_best[s])
 
     best_hits = search(query, top_k=top_k, min_score=min_score, source=best_source)
     return AutoSearchResult(hits=best_hits, matched_source=best_source)
